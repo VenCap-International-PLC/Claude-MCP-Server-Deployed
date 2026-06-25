@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+audit_log.jsonl
+.venv/
+node_modules/
+mcp_server/.env
+mcp_server/audit_log.jsonl

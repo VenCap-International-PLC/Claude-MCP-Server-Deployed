@@ -1,0 +1,29 @@
+# VenCap Bot — Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# --- Core chatbot framework ---
+chainlit
+
+# --- Anthropic Claude API ---
+anthropic
+
+# --- SQL Server connectivity ---
+pyodbc
+
+# --- Environment variable management ---
+python-dotenv
+
+# --- Excel export ---
+openpyxl
+
+# --- Chart rendering ---
+plotly
+
+# --- Word document manipulation (logo injection into .docx) ---
+python-docx
+
+# --- Image processing (logo resizing / format handling) ---
+Pillow
+
+# --- (Optional) Future MCP server support ---
+# mcp
