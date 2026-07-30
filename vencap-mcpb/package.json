@@ -1,0 +1,11 @@
+{
+  "name": "vencap-mcp-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "VenCap thin-client MCP bridge - forwards requests to the central VenCap MCP server.",
+  "main": "server/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

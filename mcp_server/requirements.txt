@@ -1,5 +1,28 @@
 # VenCap MCP Server — Python Dependencies
-# Install with: pip install -r requirements.txt
+# Install with:  pip install -r requirements.txt
+#
+# ---------------------------------------------------------------------
+# PREREQUISITES — install these BEFORE pip (they are not pip packages):
+#
+#   1. Python 3.11 or later  (tested on 3.13.5)
+#
+#   2. Microsoft ODBC Driver 18 for SQL Server
+#      Driver 17 is NOT installed on VEN-W11D-AUTO, so Driver 18 is used.
+#      Driver 18 defaults to Encrypt=yes, so connection strings must
+#      include TrustServerCertificate=yes — already handled in db_config.py.
+#
+#   3. A .env file in this same folder. NOT in Git — create it manually
+#      on each machine. Required keys:
+#
+#        MCP_API_KEY=<64-char hex key>
+#        MCP_HOST=<this machine's LAN IP, e.g. 192.168.100.148>
+#        MCP_PORT=8001
+#        DB_SERVER=<sql server instance>
+#        BOT_DB_USER=<read-only login>
+#        BOT_DB_PASSWORD=<password>
+#        GP_DB_DATABASE=<GP database name>
+#        LP_DB_DATABASE=<LP database name>
+# ---------------------------------------------------------------------
 
 # --- MCP server framework ---
 mcp[cli]

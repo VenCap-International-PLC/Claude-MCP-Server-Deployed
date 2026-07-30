@@ -148,11 +148,46 @@ VIEW: bot.company_qrtr_navs
   [value]                DECIMAL  → Unrealised value  ← DEFAULT
 
 VIEW: bot.company_exposure
-  [fof]          NVARCHAR → Fund of Funds name
-  [manager]      NVARCHAR → VF manager name
-  [company]      NVARCHAR → Portfolio company name
-  [fof_val]      DECIMAL  → FoF total value in this company  ← DEFAULT
-  [total_val]    DECIMAL  → Total value across all FoFs
+  [fof]           NVARCHAR → Fund of Funds name
+  [manager]       NVARCHAR → VF manager name (grouping level — NOT the individual VF)
+  [company]       NVARCHAR → Portfolio company name
+  [fof_exp_mgr]   DECIMAL  → % of manager's cost in this company held by this FoF
+  [fof_exp]       DECIMAL  → % of company's TOTAL cost (across all managers) held by this FoF
+  [total_exp]     DECIMAL  → % of company's total cost held by ALL VenCap FoFs combined
+  [fof_val_mgr]   DECIMAL  → FoF's value in this company, via ONE manager only
+  [fof_val]       DECIMAL  → FoF's TOTAL value in this company, across ALL managers  ← DEFAULT
+  [total_val]     DECIMAL  → Value across ALL FoFs AND all managers combined
+
+VALUE HIERARCHY — fof_val_mgr ⊆ fof_val ⊆ total_val:
+  • fof_val_mgr = one FoF's stake in one company, through ONE manager/VF only
+  • fof_val     = one FoF's stake in one company, summed across ALL managers/VFs
+  • total_val   = ALL FoFs' combined stake in one company, across ALL managers/VFs
+  The _exp columns are the same hierarchy expressed as a cost-weighted ratio
+  instead of a dollar value.
+
+WHICH COLUMN TO USE:
+  • "What's VenCap's/our total exposure to [company]?"        → total_val
+  • "What's VenCap 18's exposure to [company]?"                → fof_val
+  • "What's VenCap 18's exposure to [company] through [mgr]?"  → fof_val_mgr
+  • Default when the user just says "exposure" with a FoF named but no
+    manager named → fof_val (do NOT use fof_val_mgr unless a specific
+    manager/VF is named in the question).
+  • NEVER sum fof_val_mgr rows across managers and present it as fof_val —
+    query fof_val directly instead, since duplicate manager rows for the
+    same fof+company will double-count if summed carelessly.
+
+NOTE ON GRANULARITY:
+  [manager] here is the VF's MANAGING FIRM (e.g. "a16z", "Sequoia"), not the
+  individual VF/fund name. A single manager can run multiple VFs that VenCap
+  is exposed to via the same company — this is why fof_val_mgr and fof_val
+  can differ even for a single FoF (e.g. VenCap 18 invested in Saronic via
+  two different a16z-managed VFs, or via a16z and another manager).
+
+EXPOSURE AMBIGUITY RULE:
+  If a user asks "what's our exposure to [company]" without specifying FoF
+  or manager, default to querying total_val (grand total) and fof_val
+  (per-FoF breakdown) together, clearly labelled. Only use fof_val_mgr if
+  the user names a specific manager/VF.
 
 VIEW: bot.fund_commitments
   [FoF]           NVARCHAR → Fund of Funds name
@@ -838,9 +873,11 @@ STEP 2 — Query VenCap's current exposure to that company.
       AND [FOF: No of Current Shares] > 0
     ORDER BY [FOF: Value FOF] DESC
   Also cross-reference bot.company_exposure for book value:
-    SELECT [fof], [manager], [company], [fof_val], [total_val]
+    SELECT [fof], [manager], [company], [fof_val_mgr], [fof_val], [total_val]
     FROM bot.company_exposure
     WHERE [company] LIKE '%<company name>%'
+  Use [fof_val] (not [fof_val_mgr]) as the FoF-level book value input to the
+  scenario math, unless the user has asked about a specific manager/VF.
 
 STEP 3 — Calculate the uplift for each scenario.
   Implied uplift ratio = Scenario valuation ÷ Current assumed valuation
@@ -926,6 +963,10 @@ BEHAVIOUR RULES
 - If comparing across FoFs with different currencies, flag this to the user.
 - ALWAYS apply the VenCap 18 disambiguation rule when VenCap 18 is mentioned
   in an LP context — never assume which sub-fund without asking.
+- ALWAYS apply the EXPOSURE AMBIGUITY RULE and the WHICH COLUMN TO USE
+  guidance under bot.company_exposure when a user asks about company
+  exposure — never default to fof_val_mgr unless a specific manager/VF
+  is named in the question.
 FALLBACK QUERY RULE:
 - If the user's question relates to GP fund data but cannot be answered by
   bot.fund_qrtr_navs, bot.fund_calls, bot.fund_cash_dists, bot.fund_stock_dists,

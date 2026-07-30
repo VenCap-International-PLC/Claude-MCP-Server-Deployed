@@ -38,9 +38,23 @@ if not _MCP_API_KEY:
     )
 
 # ── MCP server instance ───────────────────────────────────────────────────────
+# MCP_HOST controls which network interface this server listens on.
+#   "127.0.0.1"          -> localhost only (old reverse-proxy design; NOT
+#                            reachable by thin clients on other laptops)
+#   "192.168.100.148"    -> this machine's internal LAN IP only (recommended
+#                            for the thin-client model — reachable over
+#                            VPN/LAN, but not on any other interface)
+#   "0.0.0.0"             -> all interfaces (broader; rely on Windows
+#                            Firewall / network isolation as the perimeter)
+# Set MCP_HOST explicitly in .env before deploying — do not leave this on
+# the 127.0.0.1 default once thin clients are in use, or every laptop
+# request will be refused at the network level before Layer 1 (API key)
+# is ever reached.
+_MCP_HOST: str = os.getenv("MCP_HOST", "127.0.0.1")
+
 mcp = FastMCP(
     name="vencap-mcp-server",
-    host="127.0.0.1",
+    host=_MCP_HOST,
     port=int(os.getenv("MCP_PORT", "8001")),
 )
 
@@ -161,5 +175,11 @@ def run_sql(query: str, database: str, api_key: str) -> str:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    logger.info("VenCap MCP Server starting on 127.0.0.1:%s", os.getenv("MCP_PORT", "8001"))
+    logger.info("VenCap MCP Server starting on %s:%s", _MCP_HOST, os.getenv("MCP_PORT", "8001"))
+    if _MCP_HOST == "127.0.0.1":
+        logger.warning(
+            "MCP_HOST is still 127.0.0.1 — this server will NOT be reachable "
+            "from thin clients on other laptops. Set MCP_HOST in .env to this "
+            "machine's LAN IP (or 0.0.0.0) before deploying for thin-client use."
+        )
     mcp.run(transport="sse")

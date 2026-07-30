@@ -1,0 +1,49 @@
+{
+  "manifest_version": "0.3",
+  "name": "vencap-mcp-client",
+  "display_name": "VenCap Portfolio Data",
+  "version": "0.1.0",
+  "description": "Query VenCap portfolio data via the central VenCap MCP server.",
+  "long_description": "This extension is a thin forwarder only. It holds no database credentials. Your API key is stored using this computer's secure credential storage and is attached to requests automatically. All requests are sent over the internal VenCap network to the central MCP server on VEN-W11D-AUTO, which performs all query validation, schema access checks, and audit logging. Requires VPN or office network.",
+  "author": {
+    "name": "VenCap International PLC",
+    "email": "it@vencapintl.local"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {
+        "VENCAP_SERVER_URL": "${user_config.central_server_url}",
+        "VENCAP_API_KEY": "${user_config.api_key}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "run_sql",
+      "description": "Query VenCap portfolio data. Only SELECT statements are permitted; enforced centrally."
+    }
+  ],
+  "user_config": {
+    "central_server_url": {
+      "type": "string",
+      "title": "VenCap MCP Server Address",
+      "description": "Internal address of the central VenCap MCP server, provided by IT.",
+      "required": true,
+      "default": "http://192.168.100.148:8001/sse"
+    },
+    "api_key": {
+      "type": "string",
+      "title": "VenCap API Key",
+      "description": "Your personal VenCap MCP API key, provided by IT. Stored securely and never shown to Claude.",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32"]
+  }
+}
