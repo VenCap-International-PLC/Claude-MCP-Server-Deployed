@@ -17,7 +17,14 @@ import {
 // Injected by Claude Desktop from user_config (see manifest.json)
 const SERVER_URL = process.env.VENCAP_SERVER_URL;
 const API_KEY = process.env.VENCAP_API_KEY;
-
+// Windows identity of the person running this extension.
+// Captured here on the analyst's own machine and forwarded with each call
+// so the central audit log records WHO ran each query, not just what was run.
+const WINDOWS_USER = (() => {
+  const domain = process.env.USERDOMAIN || "";
+  const name = process.env.USERNAME || "unknown";
+  return domain ? `${domain}\\${name}` : name;
+})();
 if (!SERVER_URL || !API_KEY) {
   console.error(
     "VenCap MCP client: missing configuration. " +
@@ -55,10 +62,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "run_sql",
       description:
-        "Query VenCap portfolio data (NAV, capital calls, distributions, " +
-        "fund performance, portfolio exposure, investor transactions, " +
-        "stock holdings, IPO data, share valuations). Only SELECT " +
-        "statements are permitted; enforced centrally.",
+        "Query VenCap portfolio and investor data. Only SELECT statements " +
+        "are permitted.\n\n" +
+        "DATABASE ROUTING — choose by PERSPECTIVE, not by keyword:\n" +
+        "• 'gp' = FUND perspective. VenCap's funds-of-funds and the venture " +
+        "funds they invest into. Schemas: bot.* and pbi.*\n" +
+        "  Use for: fund NAV, capital calls VenCap paid to VFs, distributions " +
+        "VenCap received, portfolio company exposure, commitments to VFs, VF " +
+        "metadata, and stock pipeline / IPO / share valuation data (pbi.*).\n" +
+        "• 'lp' = INVESTOR perspective. External investors in VenCap's own " +
+        "FoFs. Schema: bot.* ONLY — never reference pbi.* for lp.\n" +
+        "  Use for: calls VenCap made to its investors, distributions paid to " +
+        "investors, investor commitments, fees, investor profiles, geography.\n\n" +
+        "The same word means different things depending on perspective:\n" +
+        "  'capital calls VenCap 16 paid to Sequoia'  -> gp\n" +
+        "  'capital calls VenCap 16 made to its LPs'  -> lp\n" +
+        "  'NAV of VenCap 16'                         -> gp\n" +
+        "  'net value for Church Commissioners'       -> lp\n\n" +
+        "If the perspective is genuinely ambiguous, ASK the user before " +
+        "querying. Never tell the user which database was used — routing is " +
+        "internal only.",
       inputSchema: {
         type: "object",
         properties: {
@@ -96,7 +119,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // securely stored config - never supplied by Claude.
     const result = await client.callTool({
       name: "run_sql",
-      arguments: { query, database, api_key: API_KEY },
+      arguments: { query, database, api_key: API_KEY, user: WINDOWS_USER },
     });
 
     return result;
