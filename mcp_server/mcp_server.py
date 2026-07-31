@@ -87,6 +87,7 @@ def _audit(
     except Exception as exc:
         logger.warning("Could not write audit log: %s", exc)
 
+
 # ── API key check ─────────────────────────────────────────────────────────────
 def _check_api_key(api_key: str | None) -> bool:
     import hmac
@@ -96,24 +97,46 @@ def _check_api_key(api_key: str | None) -> bool:
 
 
 # ── run_sql tool ──────────────────────────────────────────────────────────────
+# IMPORTANT: the docstring below IS the tool description sent to every
+# analyst's Claude Desktop. From v0.4.0 of the thin client onwards, the
+# client fetches tool definitions from this server at startup rather than
+# hardcoding them. To change how Claude routes or interprets queries, edit
+# this docstring and restart the server — no extension repack or redeploy.
 @mcp.tool()
 def run_sql(query: str, database: str, api_key: str, user: str = "unknown") -> str:
     """
-    Execute a SELECT query against VenCap SQL Server databases.
+    Query VenCap portfolio and investor data. Only SELECT statements are permitted.
 
-    Use this for any question about NAV, capital calls, distributions,
-    fund performance, portfolio exposure, investor transactions,
-    stock holdings, IPO data, or share valuations.
+    DATABASE ROUTING - choose by PERSPECTIVE, not by keyword:
 
-    Only SELECT statements are permitted.
+    - 'gp' = FUND perspective. VenCap's funds-of-funds and the venture funds
+      they invest into. Schemas: bot.* and pbi.*
+      Use for: fund NAV, capital calls VenCap paid to VFs, distributions
+      VenCap received, portfolio company exposure, commitments to VFs, VF
+      metadata, and stock pipeline / IPO / share valuation data (pbi.*).
+
+    - 'lp' = INVESTOR perspective. External investors in VenCap's own FoFs.
+      Schema: bot.* ONLY - never reference pbi.* for lp.
+      Use for: calls VenCap made to its investors, distributions paid to
+      investors, investor commitments, fees, investor profiles, geography.
+
+    The same word means different things depending on perspective:
+      'capital calls VenCap 16 paid to Sequoia'  -> gp
+      'capital calls VenCap 16 made to its LPs'  -> lp
+      'NAV of VenCap 16'                         -> gp
+      'net value for Church Commissioners'       -> lp
+      'who are the investors in VenCap 16'       -> lp
+      'exposure to Snowflake'                    -> gp
+
+    If the perspective is genuinely ambiguous, ASK the user before querying.
+    Never tell the user which database was used - routing is internal only.
 
     Args:
-        query:    A valid SQL SELECT statement.
-                  GP queries may use bot.* and pbi.* schemas.
-                  LP queries may only use bot.* schema.
-        database: 'gp' for fund-level data (bot.* and pbi.* schemas)
-                  'lp' for investor-level data (bot.* schema only)
-        api_key:  Server authentication key (from MCP_API_KEY in .env)
+        query:    A valid SQL SELECT statement. GP queries may use bot.* and
+                  pbi.* schemas. LP queries may only use bot.* schema.
+        database: 'gp' for fund-level data, 'lp' for investor-level data.
+        api_key:  Supplied automatically by the thin client. Do not provide.
+        user:     Supplied automatically by the thin client. Do not provide.
     """
 
     # Layer 1 — API key
@@ -159,8 +182,8 @@ def run_sql(query: str, database: str, api_key: str, user: str = "unknown") -> s
         result = [dict(zip(columns, row)) for row in rows]
         _audit(database, query, user=user, row_count=len(rows), duration_ms=duration_ms)
         logger.info(
-            "Query OK | db=%s | rows=%d | %.1fms | sql=%s",
-            database.upper(), len(rows), duration_ms, query[:120]
+            "Query OK | db=%s | user=%s | rows=%d | %.1fms | sql=%s",
+            database.upper(), user, len(rows), duration_ms, query[:120]
         )
         return json.dumps(result, default=str)
 

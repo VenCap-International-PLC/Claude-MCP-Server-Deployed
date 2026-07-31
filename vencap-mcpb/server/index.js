@@ -3,6 +3,16 @@
  * VenCap MCP thin client.
  * Runs on each analyst's laptop, launched by Claude Desktop over stdio.
  * Holds NO database credentials and NO SQL logic.
+ *
+ * Tool definitions are fetched FROM the central server at runtime, so the
+ * tool description can be changed centrally (edit the run_sql docstring in
+ * mcp_server.py, restart the server) without repackaging or redistributing
+ * this extension.
+ *
+ * If the central server is unreachable (analyst off-VPN), a stub tool is
+ * exposed instead, which returns a clear "connect to the VPN" message.
+ * This is deliberate: if no tool were exposed at all, Claude would answer
+ * from general knowledge instead of telling the analyst what is wrong.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -17,14 +27,16 @@ import {
 // Injected by Claude Desktop from user_config (see manifest.json)
 const SERVER_URL = process.env.VENCAP_SERVER_URL;
 const API_KEY = process.env.VENCAP_API_KEY;
-// Windows identity of the person running this extension.
-// Captured here on the analyst's own machine and forwarded with each call
-// so the central audit log records WHO ran each query, not just what was run.
+
+// Windows identity of the person running this extension. Captured here on
+// the analyst's own machine and forwarded with each call so the central
+// audit log records WHO ran each query, not just what was run.
 const WINDOWS_USER = (() => {
   const domain = process.env.USERDOMAIN || "";
   const name = process.env.USERNAME || "unknown";
   return domain ? `${domain}\\${name}` : name;
 })();
+
 if (!SERVER_URL || !API_KEY) {
   console.error(
     "VenCap MCP client: missing configuration. " +
@@ -33,7 +45,21 @@ if (!SERVER_URL || !API_KEY) {
   process.exit(1);
 }
 
-// Lazy, reused connection to the central MCP server
+// How long to wait for the central server before falling back to the
+// offline stub. Kept short so an off-VPN analyst is not left hanging.
+const CONNECT_TIMEOUT_MS = 5000;
+
+// Parameters the thin client supplies itself. These are stripped from the
+// schema shown to Claude so it never sees, reasons about, or supplies them.
+const INTERNAL_PARAMS = ["api_key", "user"];
+
+// Message shown when the central server cannot be reached.
+const OFFLINE_MESSAGE =
+  "Unable to reach the VenCap data server. This tool only works while " +
+  "connected to the VenCap VPN or office network. Please check your " +
+  "connection and try again.";
+
+// ── Connection to the central MCP server ────────────────────────────────────
 let remoteClient = null;
 
 async function getRemoteClient() {
@@ -41,7 +67,7 @@ async function getRemoteClient() {
 
   const transport = new SSEClientTransport(new URL(SERVER_URL));
   const client = new Client(
-    { name: "vencap-mcp-thin-client", version: "0.1.0" },
+    { name: "vencap-mcp-thin-client", version: "0.4.0" },
     { capabilities: {} }
   );
 
@@ -50,73 +76,111 @@ async function getRemoteClient() {
   return remoteClient;
 }
 
-// Local stdio server exposed to Claude Desktop
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
+// ── Tool definitions ────────────────────────────────────────────────────────
+// Remove the parameters this client injects, so Claude never sees them.
+function stripInternalParams(tool) {
+  const schema = tool.inputSchema ? { ...tool.inputSchema } : {};
+
+  if (schema.properties) {
+    schema.properties = { ...schema.properties };
+    for (const param of INTERNAL_PARAMS) {
+      delete schema.properties[param];
+    }
+  }
+  if (Array.isArray(schema.required)) {
+    schema.required = schema.required.filter(
+      (name) => !INTERNAL_PARAMS.includes(name)
+    );
+  }
+
+  return { ...tool, inputSchema: schema };
+}
+
+// Used only when the central server cannot be reached.
+const OFFLINE_TOOLS = [
+  {
+    name: "run_sql",
+    description:
+      "Query VenCap portfolio and investor data. NOTE: the VenCap data " +
+      "server is currently unreachable — this tool requires a connection " +
+      "to the VenCap VPN or office network. If the user asks a data " +
+      "question, tell them they need to connect to the VPN. Do not attempt " +
+      "to answer VenCap data questions from general knowledge.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "A valid SQL SELECT statement." },
+        database: {
+          type: "string",
+          enum: ["gp", "lp"],
+          description: "'gp' for fund-level data, 'lp' for investor-level data.",
+        },
+      },
+      required: ["query", "database"],
+    },
+  },
+];
+
+let cachedTools = null;
+
+async function getTools() {
+  if (cachedTools) return cachedTools;
+
+  try {
+    const client = await withTimeout(
+      getRemoteClient(),
+      CONNECT_TIMEOUT_MS,
+      "Connection to VenCap server"
+    );
+    const result = await withTimeout(
+      client.listTools(),
+      CONNECT_TIMEOUT_MS,
+      "Tool listing"
+    );
+
+    cachedTools = (result.tools || []).map(stripInternalParams);
+    return cachedTools;
+  } catch (err) {
+    // Do NOT cache the offline list — the analyst may connect to the VPN
+    // later in the session, and the next attempt should try the server again.
+    console.error(
+      `VenCap MCP client: could not fetch tools from server (${err.message}). ` +
+        `Serving offline stub.`
+    );
+    remoteClient = null;
+    return OFFLINE_TOOLS;
+  }
+}
+
+// ── Local stdio server exposed to Claude Desktop ────────────────────────────
 const server = new Server(
-  { name: "vencap-mcp-client", version: "0.1.0" },
+  { name: "vencap-mcp-client", version: "0.4.0" },
   { capabilities: { tools: {} } }
 );
 
-// What Claude sees: no api_key parameter, on purpose.
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: "run_sql",
-      description:
-        "Query VenCap portfolio and investor data. Only SELECT statements " +
-        "are permitted.\n\n" +
-        "DATABASE ROUTING — choose by PERSPECTIVE, not by keyword:\n" +
-        "• 'gp' = FUND perspective. VenCap's funds-of-funds and the venture " +
-        "funds they invest into. Schemas: bot.* and pbi.*\n" +
-        "  Use for: fund NAV, capital calls VenCap paid to VFs, distributions " +
-        "VenCap received, portfolio company exposure, commitments to VFs, VF " +
-        "metadata, and stock pipeline / IPO / share valuation data (pbi.*).\n" +
-        "• 'lp' = INVESTOR perspective. External investors in VenCap's own " +
-        "FoFs. Schema: bot.* ONLY — never reference pbi.* for lp.\n" +
-        "  Use for: calls VenCap made to its investors, distributions paid to " +
-        "investors, investor commitments, fees, investor profiles, geography.\n\n" +
-        "The same word means different things depending on perspective:\n" +
-        "  'capital calls VenCap 16 paid to Sequoia'  -> gp\n" +
-        "  'capital calls VenCap 16 made to its LPs'  -> lp\n" +
-        "  'NAV of VenCap 16'                         -> gp\n" +
-        "  'net value for Church Commissioners'       -> lp\n\n" +
-        "If the perspective is genuinely ambiguous, ASK the user before " +
-        "querying. Never tell the user which database was used — routing is " +
-        "internal only.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description:
-              "A valid SQL SELECT statement. GP queries may use bot.* " +
-              "and pbi.* schemas. LP queries may only use bot.* schema.",
-          },
-          database: {
-            type: "string",
-            enum: ["gp", "lp"],
-            description:
-              "'gp' for fund-level data (bot.* and pbi.* schemas), " +
-              "'lp' for investor-level data (bot.* schema only).",
-          },
-        },
-        required: ["query", "database"],
-      },
-    },
-  ],
+  tools: await getTools(),
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name !== "run_sql") {
-    throw new Error(`Unknown tool: ${request.params.name}`);
-  }
+  const { name, arguments: args } = request.params;
 
-  const { query, database } = request.params.arguments ?? {};
-
+  // The API key and Windows username are attached HERE, by the thin client,
+  // from its own securely stored config — never supplied by Claude.
   const attempt = async () => {
     const client = await getRemoteClient();
     return await client.callTool({
-      name: "run_sql",
-      arguments: { query, database, api_key: API_KEY, user: WINDOWS_USER },
+      name,
+      arguments: { ...(args ?? {}), api_key: API_KEY, user: WINDOWS_USER },
     });
   };
 
@@ -124,26 +188,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return await attempt();
   } catch (err) {
     // The cached connection may be stale — e.g. the central server was
-    // restarted. Discard it and try once more with a fresh connection
-    // before surfacing an error to the analyst.
+    // restarted. Discard it and try once more before surfacing an error.
     remoteClient = null;
+    cachedTools = null;
     try {
       return await attempt();
     } catch (retryErr) {
       return {
-        content: [
-          {
-            type: "text",
-            text:
-              `Error reaching the VenCap MCP server: ${retryErr.message}\n` +
-              `Check that you are connected to the VenCap VPN or office network.`,
-          },
-        ],
+        content: [{ type: "text", text: `${OFFLINE_MESSAGE}\n\n(${retryErr.message})` }],
         isError: true,
       };
     }
   }
 });
 
+// ── Start ────────────────────────────────────────────────────────────────────
 const transport = new StdioServerTransport();
 await server.connect(transport);
