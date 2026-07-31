@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "vencap-mcp-client",
   "display_name": "VenCap Portfolio Data",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Query VenCap portfolio data via the central VenCap MCP server.",
   "long_description": "This extension is a thin forwarder only. It holds no database credentials. Your API key is stored using this computer's secure credential storage and is attached to requests automatically. All requests are sent over the internal VenCap network to the central MCP server on VEN-W11D-AUTO, which performs all query validation, schema access checks, and audit logging. Requires VPN or office network.",
   "author": {

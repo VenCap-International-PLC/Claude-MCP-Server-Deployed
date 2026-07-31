@@ -112,29 +112,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   const { query, database } = request.params.arguments ?? {};
 
-  try {
+  const attempt = async () => {
     const client = await getRemoteClient();
-
-    // The API key is attached HERE, by the thin client, from its own
-    // securely stored config - never supplied by Claude.
-    const result = await client.callTool({
+    return await client.callTool({
       name: "run_sql",
       arguments: { query, database, api_key: API_KEY, user: WINDOWS_USER },
     });
+  };
 
-    return result;
+  try {
+    return await attempt();
   } catch (err) {
-    return {
-      content: [
-        {
-          type: "text",
-          text:
-            `Error reaching the VenCap MCP server: ${err.message}\n` +
-            `Check that you are connected to the VenCap VPN or office network.`,
-        },
-      ],
-      isError: true,
-    };
+    // The cached connection may be stale — e.g. the central server was
+    // restarted. Discard it and try once more with a fresh connection
+    // before surfacing an error to the analyst.
+    remoteClient = null;
+    try {
+      return await attempt();
+    } catch (retryErr) {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Error reaching the VenCap MCP server: ${retryErr.message}\n` +
+              `Check that you are connected to the VenCap VPN or office network.`,
+          },
+        ],
+        isError: true,
+      };
+    }
   }
 });
 
