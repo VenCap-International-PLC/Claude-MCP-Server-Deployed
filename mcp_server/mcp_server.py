@@ -3,9 +3,12 @@
 # =============================================================================
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -19,14 +22,40 @@ load_dotenv(override=True)
 from mcp.server.fastmcp import FastMCP
 from db_config import connect_gp, connect_lp
 from security import is_safe_query, validate_schema_access
+from log_rotation import MonthlyRotatingFileHandler, rotate_if_stale
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+# Python now writes server_console.log itself (instead of start_server.bat
+# redirecting output into it). That is what makes monthly rotation possible:
+# the file is only ever held open by this process, so it can be closed,
+# moved to old_logs/ and reopened at the start of each month.
+_HERE        = Path(__file__).parent
+_ARCHIVE_DIR = _HERE / "old_logs"
+_CONSOLE_LOG = _HERE / "server_console.log"
+
+_log_fmt = logging.Formatter(
+    "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+_file_handler = MonthlyRotatingFileHandler(_CONSOLE_LOG, _ARCHIVE_DIR)
+_file_handler.setFormatter(_log_fmt)
+_handlers: list[logging.Handler] = [_file_handler]
+if sys.stdout and sys.stdout.isatty():           # also echo when run by hand
+    _console = logging.StreamHandler(sys.stdout)
+    _console.setFormatter(_log_fmt)
+    _handlers.append(_console)
+logging.basicConfig(level=logging.INFO, handlers=_handlers, force=True)
 logger = logging.getLogger("vencap.mcp")
+
+
+def _log_uncaught(exc_type, exc, tb):
+    logger.critical("Uncaught exception — server exiting", exc_info=(exc_type, exc, tb))
+
+sys.excepthook = _log_uncaught
+
+# Per-query timeout (seconds). The longest queries in the log ran 10-17
+# minutes; long before then the analyst's client has usually given up.
+_QUERY_TIMEOUT: int = int(os.getenv("DB_QUERY_TIMEOUT", "120"))
 
 # ── API key ───────────────────────────────────────────────────────────────────
 _MCP_API_KEY: str = os.getenv("MCP_API_KEY", "")
@@ -59,7 +88,8 @@ mcp = FastMCP(
 )
 
 # ── Audit log ─────────────────────────────────────────────────────────────────
-_AUDIT_LOG = Path(__file__).parent / "audit_log.jsonl"
+_AUDIT_LOG  = _HERE / "audit_log.jsonl"
+_audit_lock = threading.Lock()   # tool calls can run concurrently
 
 
 def _audit(
@@ -81,11 +111,19 @@ def _audit(
         "duration_ms":  duration_ms,
         "sql":          sql,
     }
-    try:
-        with _AUDIT_LOG.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, default=str) + "\n")
-    except Exception as exc:
-        logger.warning("Could not write audit log: %s", exc)
+    line = json.dumps(entry, default=str) + "\n"
+    with _audit_lock:
+        try:
+            archived = rotate_if_stale(_AUDIT_LOG, _ARCHIVE_DIR)
+            if archived:
+                logger.info("Audit log rotated -> %s", archived.name)
+        except OSError as exc:   # e.g. file open in an editor; retry next write
+            logger.warning("Could not rotate audit log (will retry): %s", exc)
+        try:
+            with _AUDIT_LOG.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+        except Exception as exc:
+            logger.warning("Could not write audit log: %s", exc)
 
 
 # ── API key check ─────────────────────────────────────────────────────────────
@@ -95,6 +133,9 @@ def _check_api_key(api_key: str | None) -> bool:
         return False
     return hmac.compare_digest(api_key.strip(), _MCP_API_KEY)
 
+
+# Console log lines deliberately omit the SQL text — the full statement for
+# every query lives only in audit_log.jsonl (match on timestamp + user).
 
 # ── run_sql tool ──────────────────────────────────────────────────────────────
 # IMPORTANT: the docstring below IS the tool description sent to every
@@ -153,13 +194,13 @@ def run_sql(query: str, database: str, api_key: str, user: str = "unknown") -> s
 
     # Layer 3 — SQL safety check
     if not is_safe_query(query):
-        logger.warning("SECURITY: Query blocked by safety check. SQL: %s", query[:200])
+        logger.warning("SECURITY: Query blocked by safety check | db=%s | user=%s", database, user)
         _audit(database, query, user=user, blocked=True, block_reason="sql_safety_check")
         return "Error: Query blocked. Only SELECT statements are permitted."
 
     # Layer 4 — schema access check
     if not validate_schema_access(query, database):
-        logger.warning("SECURITY: Query blocked by schema check. SQL: %s", query[:200])
+        logger.warning("SECURITY: Query blocked by schema check | db=%s | user=%s", database, user)
         _audit(database, query, user=user, blocked=True, block_reason="schema_access_check")
         return "Error: Query references a schema not permitted for this database."
 
@@ -168,6 +209,7 @@ def run_sql(query: str, database: str, api_key: str, user: str = "unknown") -> s
     try:
         start = time.perf_counter()
         conn  = connect_lp() if database == "lp" else connect_gp()
+        conn.timeout = _QUERY_TIMEOUT   # per-query limit (connect timeout is separate)
 
         cursor = conn.cursor()
         cursor.execute(query)
@@ -182,19 +224,72 @@ def run_sql(query: str, database: str, api_key: str, user: str = "unknown") -> s
         result = [dict(zip(columns, row)) for row in rows]
         _audit(database, query, user=user, row_count=len(rows), duration_ms=duration_ms)
         logger.info(
-            "Query OK | db=%s | user=%s | rows=%d | %.1fms | sql=%s",
-            database.upper(), user, len(rows), duration_ms, query[:120]
+            "Query OK | db=%s | user=%s | rows=%d | %.1fms",
+            database.upper(), user, len(rows), duration_ms,
         )
         return json.dumps(result, default=str)
 
     except Exception as exc:
-        logger.error("DB error | db=%s | error=%s | sql=%s", database, exc, query[:200])
+        if "HYT00" in str(exc):   # ODBC "Query timeout expired"
+            logger.warning("Query timeout | db=%s | user=%s", database, user)
+            _audit(database, query, user=user, blocked=True, block_reason="query_timeout")
+            return (
+                f"Error: query exceeded the {_QUERY_TIMEOUT}s time limit and was cancelled. "
+                "Narrow it (filter by fund, date range, or use TOP / aggregation) and retry."
+            )
+        logger.error("DB error | db=%s | user=%s | error=%s", database, user, exc)
         _audit(database, query, user=user, blocked=True, block_reason=f"db_error: {exc}")
         return f"Database error: {str(exc)}"
 
     finally:
         if conn:
             conn.close()
+
+
+# ── Event-loop watchdog ───────────────────────────────────────────────────────
+# Windows' asyncio Proactor loop has a failure mode: if a client's network
+# drops at exactly the wrong moment (VPN blip, Wi-Fi change, laptop sleeping),
+# accept() raises WinError 64, asyncio logs "Accept failed on a socket" and
+# CLOSES THE LISTENING SOCKET. The process stays alive but never accepts
+# another connection — so Task Scheduler sees nothing wrong and never
+# restarts it. This handler turns that silent hang into a clean exit, and
+# start_server.bat brings the server straight back up.
+_HARMLESS_DISCONNECTS = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
+
+def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    message = context.get("message", "")
+    exc = context.get("exception")
+
+    if "Accept failed" in message:
+        logger.critical(
+            "Listening socket was closed by asyncio (%r). Exiting so "
+            "start_server.bat restarts the server.", exc,
+        )
+        logging.shutdown()   # flush logs before exiting
+        os._exit(3)
+
+    if isinstance(exc, _HARMLESS_DISCONNECTS):
+        # WinError 10054 etc: an analyst's client closed its connection.
+        # Previously a full traceback each time (~270 in the log) — pure noise.
+        logger.debug("Client disconnected: %r", exc)
+        return
+
+    loop.default_exception_handler(context)
+
+
+async def _serve() -> None:
+    import uvicorn
+
+    asyncio.get_running_loop().set_exception_handler(_loop_exception_handler)
+    config = uvicorn.Config(
+        mcp.sse_app(),
+        host=_MCP_HOST,
+        port=int(os.getenv("MCP_PORT", "8001")),
+        log_level="info",
+        log_config=None,   # route uvicorn's logs through our handlers above
+    )
+    await uvicorn.Server(config).serve()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -206,4 +301,6 @@ if __name__ == "__main__":
             "from thin clients on other laptops. Set MCP_HOST in .env to this "
             "machine's LAN IP (or 0.0.0.0) before deploying for thin-client use."
         )
-    mcp.run(transport="sse")
+    # Equivalent to mcp.run(transport="sse"), but lets us install the
+    # watchdog exception handler on the event loop first.
+    asyncio.run(_serve())

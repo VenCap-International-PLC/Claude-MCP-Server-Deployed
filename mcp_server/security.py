@@ -40,12 +40,12 @@ def is_safe_query(sql: str) -> bool:
     clean = sql.strip().upper()
 
     if not clean.startswith("SELECT"):
-        logger.warning(f"SECURITY BLOCK: Query does not start with SELECT. SQL: {sql[:200]}")
+        logger.warning("SECURITY BLOCK: Query does not start with SELECT.")
         return False
 
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, clean, re.IGNORECASE | re.DOTALL):
-            logger.warning(f"SECURITY BLOCK: Pattern '{pattern}' matched. SQL: {sql[:200]}")
+            logger.warning(f"SECURITY BLOCK: Pattern '{pattern}' matched.")
             return False
 
     return True
@@ -66,8 +66,7 @@ def validate_schema_access(sql: str, database: str) -> bool:
     for schema in referenced:
         if schema.lower() not in permitted:
             logger.warning(
-                f"SECURITY BLOCK: Schema '{schema}' not permitted for database='{database}'. "
-                f"SQL: {sql[:200]}"
+                f"SECURITY BLOCK: Schema '{schema}' not permitted for database='{database}'."
             )
             return False
 
